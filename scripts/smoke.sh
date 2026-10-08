@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 # smoke.sh <base-url> <cid>...
 # Runs the redirect router's checks against a deployed or local Pages URL.
-# Exit 0 unless at least one check FAILs.
+# A payload CID 302s to the provider's /ipfs/<cid>?format=car and a piece CID to
+# /piece/<cid>. Exit 0 unless at least one check FAILs.
 set -uo pipefail
 
 if [ "$#" -lt 2 ]; then
@@ -42,11 +43,11 @@ for cid in "$@"; do
   case "$code" in
     302)
       echo "PASS $cid -> 302 Location: $loc"
-      target_code="$(curl -sI -A 'Mozilla/5.0' -o /dev/null -w '%{http_code}' "$loc" || true)"
+      target_code="$(curl -s -m 10 -o /dev/null -r 0-0 -w '%{http_code}' -A 'Mozilla/5.0' "$loc" || true)"
       echo "INFO   target $loc -> $target_code"
       ;;
     404)
-      echo "WARN $cid -> 404 (piece not indexed)"
+      echo "WARN $cid -> 404 (no provider indexed)"
       ;;
     *)
       echo "FAIL $cid -> $code"

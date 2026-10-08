@@ -1,15 +1,17 @@
 # filecoin-redirect
 
-A redirect-only router on Cloudflare Pages. Given a CID it never proxies or fetches content; every response is one redirect or an error. `GET /retrieve/{cid}`: a PieceCID v2 is looked up on cid.contact and redirected to a storage provider's `/piece/{cid}`; any other CID is redirected, with no lookup, to a gateway that finds providers itself.
+A redirect-only router on Cloudflare Pages. Given a CID it never proxies or fetches content; every response is one redirect or an error. `GET /retrieve/{cid}`: every valid CID is looked up on cid.contact and redirected straight to the provider's trustless gateway.
 
 ## Contract
 
-- PieceCID v2 (`bafkzcib...`, CIDv1 with raw codec and multihash code 0x1011): cid.contact lookup, 302 to the first provider advertising `filecoin-piece-http` (0x0930) with an https address; cached for `CACHE_TTL_SECONDS`.
-- Any other valid CID (payload CID): no lookup, 302 to `${GATEWAY_URL}/ipfs/{cid}`, cached with max-age 86400.
-- No HTTP piece provider indexed: 404, cached 60s. Indexer failure: 502, not cached. Non-CID input: 400. Accepted CIDs are written in base32, base36 or base58btc (CIDv0 `Qm...`); anything else, including other multibase encodings, gets 400.
-- `Access-Control-Allow-Origin: *` on every response.
-- A piece is the exact bytes the client uploaded, served with a sniffed content type, so a raw file (image, PDF, video) renders in the browser and a CAR upload downloads as a CAR. Payload CIDs render through inbrowser.link, which finds providers itself via delegated routing.
-- Browser `fetch()` works against the piece path: the public HTTP API sends wildcard CORS. The gateway path does not: inbrowser.link's redirect carries no CORS headers and its subdomain serves a service-worker bootstrap page, so `fetch()` of a payload CID does not return the bytes.
+- PieceCID v2 (`bafkzcib...`, CIDv1 with raw codec and multihash code 0x1011): cid.contact lookup, 302 to `{provider}/piece/{cid}` for the first provider advertising `filecoin-piece-http` (0x0930) with an https address; cached for `CACHE_TTL_SECONDS` (default 300; digits only, 1 to 86400, larger values clamped to 86400; anything else, including 0, gives 300).
+- Every other valid CID (payload CID): cid.contact lookup, 302 to `{provider}/ipfs/{cid}?format=car` for the first provider advertising gateway-http (0x0920) with an https address; same cache TTL.
+- No matching provider: 404, `public, max-age=60`, body `no HTTP piece provider indexed` (piece) or `no HTTP gateway provider indexed` (payload). Indexer failure or timeout: 502, not cached.
+- Accepted CIDs are written in base32, base36 or base58btc (CIDv0 `Qm...`); anything else, including other multibase encodings, gets 400.
+- Provider URLs are filtered: only public-looking DNS names are accepted (no IP literals, localhost or private-looking names). The first matching provider wins; there is no ranking, no liveness check and no fallback.
+- `Access-Control-Allow-Origin: *` on every GET and HEAD response.
+- The service never fetches, proxies, caches or verifies content; the provider is whoever announced the CID to IPNI, so clients should verify what they receive (a CAR carries its root CID).
+- Payload CIDs download as CARs rather than render in a browser. Providers typically send wildcard CORS, so browser `fetch()` usually works (not guaranteed).
 
 ## Examples
 
@@ -23,7 +25,6 @@ curl -sI https://<project>.pages.dev/retrieve/<payloadCid>
 Edit `[vars]` in `wrangler.toml`; with `pages_build_output_dir` set, that file is the source of truth for configuration and the dashboard shows the same fields read-only.
 
 - `INDEXER_URL` (default `https://cid.contact`)
-- `GATEWAY_URL` (default `https://inbrowser.link`)
 - `CACHE_TTL_SECONDS` (default `300`)
 
 ## Local development
@@ -33,7 +34,7 @@ npm ci
 npm test
 npm run typecheck
 npx wrangler pages dev   # foreground; serves http://localhost:8788
-scripts/smoke.sh http://localhost:8788 <cid>...
+scripts/smoke.sh http://localhost:8788 bafkreiauo4htqtbs55hyn6yt3og7zpvhfqoz4n2obstz6fn3j6nebbqg44 <pieceCidV2>
 ```
 
 ## Deploy
@@ -42,14 +43,15 @@ Connect the repo to Cloudflare Pages in the dashboard (Pages Git integration). N
 
 ## Known limitations
 
-- PieceCID v1 (`baga6ea4...`, v1 piece multihash) is not indexed by Curio PDP and is not a v2 piece, so it falls to the gateway path and will not resolve there.
-- No fallback if the chosen provider is down; the router does not verify provider liveness.
-- `https://inbrowser.link/ipfs/<cid>` answers a 301 to its `<cid>.ipfs.inbrowser.link` subdomain for a browser User-Agent and 403 for curl's default User-Agent.
+- The first matching provider wins; there is no ranking, no liveness check and no fallback.
+- Many CIDs (bitswap- or graphsync-only) have no gateway-http provider and return 404; a provider that announces graphsync together with gateway-http is not matched.
+- PieceCID v1 (`baga6ea4...`) and other non-v2 CIDs are treated as payload CIDs and will usually 404.
+- Redirects cached by clients before this change may still point at the previous gateway for up to 24 hours.
+- Piece CIDs return 404 until a provider announces filecoin-piece-http.
 
 ## Out of scope
 
-- Provider preference or ordering beyond the first https advertiser
-- Geo-based selection
-- Retries or liveness checks
-- Piece-to-payload mapping
+- Liveness probes
+- Fallback gateway
+- Provider ranking
 - Logging or dashboards

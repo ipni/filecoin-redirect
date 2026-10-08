@@ -8,11 +8,12 @@
   <body>
     <h1>Filecoin redirect</h1>
     <p>
-      <code>GET /retrieve/{cid}</code> redirects only: a PieceCID v2 is looked up on
-      cid.contact and 302s to a storage provider's <code>/piece/{cid}</code> (404 when no
-      HTTP piece provider is indexed, 502 when the indexer is unavailable); any other CID
-      302s, with no lookup, to <code>https://inbrowser.link/ipfs/{cid}</code>. There is no
-      fallback serving of content here.
+      <code>GET /retrieve/{cid}</code> redirects only: every valid CID is looked up on
+      cid.contact. A PieceCID v2 302s to a storage provider's <code>/piece/{cid}</code> and
+      any other (payload) CID 302s to <code>{provider}/ipfs/{cid}?format=car</code>, in
+      each case the first provider advertising the matching transport with an https
+      address (404 when no such provider is indexed, 502 when the indexer is
+      unavailable). Nothing is fetched, proxied or served here.
     </p>
   </body>
 </html>
