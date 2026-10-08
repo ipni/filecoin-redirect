@@ -4,7 +4,7 @@ A redirect-only router on Cloudflare Pages. Given a CID it answers with a single
 
 ## Contract
 
-- PieceCID v2 (`baga6ea4...`, v2 piece multihash): cid.contact lookup, 302 to the first provider advertising `filecoin-piece-http` (0x0930) with an https address; cached for `CACHE_TTL_SECONDS`.
+- PieceCID v2 (`bafkzcib...`, CIDv1 with raw codec and multihash code 0x1011): cid.contact lookup, 302 to the first provider advertising `filecoin-piece-http` (0x0930) with an https address; cached for `CACHE_TTL_SECONDS`.
 - Any other valid CID (payload CID): no lookup, 302 to `${GATEWAY_URL}/ipfs/{cid}`, cached with max-age 86400.
 - No HTTP piece provider indexed: 404, cached 60s. Indexer failure: 502, not cached. Non-CID input: 400.
 - `Access-Control-Allow-Origin: *` on every response.
