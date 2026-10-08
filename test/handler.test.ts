@@ -1,8 +1,9 @@
 import { describe, expect, it } from "vitest";
 import { CID } from "multiformats/cid";
 import { base36 } from "multiformats/bases/base36";
-import { handle, type Deps } from "../src/handler";
+import { handle, type Deps, type Env } from "../src/handler";
 import emptyFixture from "./fixtures/empty.json";
+import bothFixture from "./fixtures/both.json";
 import gatewayOnlyFixture from "./fixtures/gateway-only.json";
 import pieceHitFixture from "./fixtures/piece-hit.json";
 
@@ -79,9 +80,9 @@ function get(url: string, method = "GET"): Request {
 }
 
 describe("payload CID path", () => {
-  it("302s a bafy CID to the gateway with no fetch and no cache write", async () => {
+  it("302s a bafy CID through the indexed gateway and caches the 302", async () => {
     const cache = new FakeCache();
-    const { fetch: fetchImpl, calls } = stubFetch();
+    const { fetch: fetchImpl, calls } = stubFetch({ body: gatewayOnlyFixture });
     const deps = makeDeps(fetchImpl, cache);
     const resp = await handle(
       get("https://redirect.example.com/retrieve/" + IPFS_CID),
@@ -89,38 +90,127 @@ describe("payload CID path", () => {
       {},
       deps
     );
+    await flush(deps);
     expect(resp.status).toBe(302);
-    expect(resp.headers.get("Location")).toBe(`https://inbrowser.link/ipfs/${IPFS_CID}`);
-    expect(resp.headers.get("Cache-Control")).toBe("public, max-age=86400");
+    expect(resp.headers.get("Location")).toBe(
+      `https://gw.example.com/ipfs/${IPFS_CID}?format=car`
+    );
+    expect(resp.headers.get("Cache-Control")).toBe("public, max-age=300");
     expect(resp.headers.get("Access-Control-Allow-Origin")).toBe("*");
-    expect(calls).toHaveLength(0);
-    expect(cache.putCount).toBe(0);
+    expect(calls).toHaveLength(1);
+    expect(calls[0]?.url).toBe(`https://cid.contact/cid/${IPFS_CID}`);
+    expect(cache.putCount).toBe(1);
+
+    const second = stubFetch({ throws: true });
+    const again = await handle(
+      get("https://redirect.example.com/retrieve/" + IPFS_CID),
+      IPFS_CID,
+      {},
+      makeDeps(second.fetch, cache)
+    );
+    expect(again.status).toBe(302);
+    expect(again.headers.get("Location")).toBe(
+      `https://gw.example.com/ipfs/${IPFS_CID}?format=car`
+    );
+    expect(second.calls).toHaveLength(0);
   });
 
-  it("302s a v0 CID to the gateway with no fetch", async () => {
+  it("302s a v0 CID through the indexed gateway using its v0 string", async () => {
     const cache = new FakeCache();
-    const { fetch: fetchImpl, calls } = stubFetch();
+    const { fetch: fetchImpl, calls } = stubFetch({ body: gatewayOnlyFixture });
+    const deps = makeDeps(fetchImpl, cache);
     const resp = await handle(
       get("https://redirect.example.com/retrieve/" + CIDV0),
       CIDV0,
       {},
-      makeDeps(fetchImpl, cache)
+      deps
     );
+    await flush(deps);
     expect(resp.status).toBe(302);
-    expect(resp.headers.get("Location")).toBe(`https://inbrowser.link/ipfs/${CIDV0}`);
-    expect(calls).toHaveLength(0);
-    expect(cache.putCount).toBe(0);
+    expect(resp.headers.get("Location")).toBe(
+      `https://gw.example.com/ipfs/${CIDV0}?format=car`
+    );
+    expect(resp.headers.get("Cache-Control")).toBe("public, max-age=300");
+    expect(calls).toHaveLength(1);
+    expect(calls[0]?.url).toBe(`https://cid.contact/cid/${CIDV0}`);
+    expect(cache.putCount).toBe(1);
   });
 
-  it("honours a custom GATEWAY_URL with a trailing slash", async () => {
-    const { fetch: fetchImpl } = stubFetch();
+  it("404s and caches a payload CID when only piece providers are indexed", async () => {
+    const cache = new FakeCache();
+    const { fetch: fetchImpl } = stubFetch({ body: pieceHitFixture });
+    const deps = makeDeps(fetchImpl, cache);
     const resp = await handle(
       get("https://redirect.example.com/retrieve/" + IPFS_CID),
       IPFS_CID,
-      { GATEWAY_URL: "https://gw.example.com/" },
+      {},
+      deps
+    );
+    await flush(deps);
+    expect(resp.status).toBe(404);
+    expect(await resp.text()).toBe("no HTTP gateway provider indexed");
+    expect(resp.headers.get("Cache-Control")).toBe("public, max-age=60");
+    expect(cache.putCount).toBe(1);
+  });
+
+  it("picks the piece or ipfs path for the same both-transport provider", async () => {
+    const { fetch: fetchImpl } = stubFetch({ body: bothFixture });
+    const payload = await handle(
+      get("https://redirect.example.com/retrieve/" + IPFS_CID),
+      IPFS_CID,
+      {},
       makeDeps(fetchImpl)
     );
-    expect(resp.headers.get("Location")).toBe(`https://gw.example.com/ipfs/${IPFS_CID}`);
+    expect(payload.headers.get("Location")).toBe(
+      `https://sp.example.com/ipfs/${IPFS_CID}?format=car`
+    );
+
+    const piece = await handle(
+      get("https://redirect.example.com/retrieve/" + PIECE_CID),
+      PIECE_CID,
+      {},
+      makeDeps(fetchImpl)
+    );
+    expect(piece.headers.get("Location")).toBe(
+      `https://sp.example.com/piece/${PIECE_CID}`
+    );
+  });
+
+  it("404s and caches when the indexer 404s for a payload CID", async () => {
+    const cache = new FakeCache();
+    const { fetch: fetchImpl } = stubFetch({
+      response: new Response("not found", { status: 404 })
+    });
+    const deps = makeDeps(fetchImpl, cache);
+    const resp = await handle(
+      get("https://redirect.example.com/retrieve/" + IPFS_CID),
+      IPFS_CID,
+      {},
+      deps
+    );
+    await flush(deps);
+    expect(resp.status).toBe(404);
+    expect(await resp.text()).toBe("no HTTP gateway provider indexed");
+    expect(resp.headers.get("Cache-Control")).toBe("public, max-age=60");
+    expect(cache.putCount).toBe(1);
+  });
+
+  it("502s without caching when the indexer 500s for a payload CID", async () => {
+    const cache = new FakeCache();
+    const { fetch: fetchImpl } = stubFetch({
+      response: new Response("boom", { status: 500 })
+    });
+    const deps = makeDeps(fetchImpl, cache);
+    const resp = await handle(
+      get("https://redirect.example.com/retrieve/" + IPFS_CID),
+      IPFS_CID,
+      {},
+      deps
+    );
+    await flush(deps);
+    expect(resp.status).toBe(502);
+    expect(resp.headers.get("Cache-Control")).toBe("no-store");
+    expect(cache.putCount).toBe(0);
   });
 });
 
@@ -234,6 +324,7 @@ describe("piece CID path", () => {
     );
     await flush(deps);
     expect(resp.status).toBe(404);
+    expect(await resp.text()).toBe("no HTTP piece provider indexed");
     expect(resp.headers.get("Cache-Control")).toBe("public, max-age=60");
     expect(resp.headers.get("Content-Type")).toBe("text/plain; charset=utf-8");
     expect(cache.putCount).toBe(1);
@@ -309,16 +400,30 @@ describe("errors and methods", () => {
   });
 
   it("returns a null body for HEAD on the payload path, a piece hit and a piece miss", async () => {
-    const payload = stubFetch();
+    const getStub = stubFetch({ body: gatewayOnlyFixture });
+    const getResp = await handle(
+      get("https://redirect.example.com/retrieve/" + IPFS_CID),
+      IPFS_CID,
+      {},
+      makeDeps(getStub.fetch)
+    );
+
+    const payload = stubFetch({ body: gatewayOnlyFixture });
     const payloadResp = await handle(
       get("https://redirect.example.com/retrieve/" + IPFS_CID, "HEAD"),
       IPFS_CID,
       {},
       makeDeps(payload.fetch)
     );
-    expect(payloadResp.status).toBe(302);
+    expect(payloadResp.status).toBe(getResp.status);
     expect(payloadResp.body).toBeNull();
-    expect(payloadResp.headers.get("Location")).toBe(`https://inbrowser.link/ipfs/${IPFS_CID}`);
+    expect(payloadResp.headers.get("Location")).toBe(
+      `https://gw.example.com/ipfs/${IPFS_CID}?format=car`
+    );
+    expect(payloadResp.headers.get("Cache-Control")).toBe(
+      getResp.headers.get("Cache-Control")
+    );
+    expect(payloadResp.headers.get("Access-Control-Allow-Origin")).toBe("*");
 
     const cache = new FakeCache();
     const hitStub = stubFetch({ body: pieceHitFixture });
@@ -384,23 +489,32 @@ describe("malformed indexer bodies", () => {
       expect(cache.putCount).toBe(1);
     });
   });
+
+  it("404s (cached) for a payload CID when the gateway provider has non-string addrs", async () => {
+    const cache = new FakeCache();
+    const body = {
+      MultihashResults: [
+        { ProviderResults: [{ Metadata: "oBIA", Provider: { Addrs: [5] } }] }
+      ]
+    };
+    const { fetch: fetchImpl } = stubFetch({ body });
+    const deps = makeDeps(fetchImpl, cache);
+    const resp = await handle(
+      get("https://redirect.example.com/retrieve/" + IPFS_CID),
+      IPFS_CID,
+      {},
+      deps
+    );
+    await flush(deps);
+    expect(resp.status).toBe(404);
+    expect(await resp.text()).toBe("no HTTP gateway provider indexed");
+    expect(resp.headers.get("Cache-Control")).toBe("public, max-age=60");
+    expect(cache.putCount).toBe(1);
+  });
 });
 
 describe("blank env settings fall back to defaults", () => {
   for (const blank of ["", "   ", "\t"]) {
-    it(`uses the default gateway for GATEWAY_URL ${JSON.stringify(blank)}`, async () => {
-      const { fetch: fetchImpl } = stubFetch();
-      const resp = await handle(
-        get("https://redirect.example.com/retrieve/" + IPFS_CID),
-        IPFS_CID,
-        { GATEWAY_URL: blank },
-        makeDeps(fetchImpl)
-      );
-      expect(resp.headers.get("Location")).toBe(
-        `https://inbrowser.link/ipfs/${IPFS_CID}`
-      );
-    });
-
     it(`uses the default indexer for INDEXER_URL ${JSON.stringify(blank)}`, async () => {
       const { fetch: fetchImpl, calls } = stubFetch({ body: pieceHitFixture });
       const resp = await handle(
@@ -496,5 +610,110 @@ describe("indexer request details and env overrides", () => {
     const headers = init?.headers as Record<string, string> | undefined;
     expect(headers?.Accept).toBe("application/json");
     expect(init?.signal).toBeInstanceOf(AbortSignal);
+  });
+});
+
+describe("TTL clamp", () => {
+  async function cacheControlFor(value: string | undefined): Promise<string | null> {
+    const { fetch: fetchImpl } = stubFetch({ body: gatewayOnlyFixture });
+    const resp = await handle(
+      get("https://redirect.example.com/retrieve/" + IPFS_CID),
+      IPFS_CID,
+      { CACHE_TTL_SECONDS: value },
+      makeDeps(fetchImpl)
+    );
+    return resp.headers.get("Cache-Control");
+  }
+
+  it("uses a valid TTL, trimming surrounding spaces", async () => {
+    expect(await cacheControlFor("60")).toBe("public, max-age=60");
+    expect(await cacheControlFor(" 120 ")).toBe("public, max-age=120");
+  });
+
+  it("falls back to 300 for a missing or non-digit TTL", async () => {
+    for (const value of [undefined, "", "  ", "abc", "1e4", "3600s", "-5"]) {
+      expect(await cacheControlFor(value)).toBe("public, max-age=300");
+    }
+  });
+
+  it("falls back to 300 for a zero TTL", async () => {
+    expect(await cacheControlFor("0")).toBe("public, max-age=300");
+    expect(await cacheControlFor("00")).toBe("public, max-age=300");
+  });
+
+  it("clamps huge TTLs to 86400", async () => {
+    expect(await cacheControlFor("99999999")).toBe("public, max-age=86400");
+    expect(await cacheControlFor("9".repeat(30))).toBe("public, max-age=86400");
+  });
+});
+
+describe("indexer body cancel guard", () => {
+  const rejectingStream = (status: number): Response =>
+    new Response(
+      new ReadableStream({
+        start(controller) {
+          controller.enqueue(new Uint8Array([1]));
+        },
+        cancel() {
+          return Promise.reject(new Error("cancel failed"));
+        }
+      }),
+      { status }
+    );
+
+  for (const cid of [IPFS_CID, PIECE_CID]) {
+    const expectedBody =
+      cid === PIECE_CID
+        ? "no HTTP piece provider indexed"
+        : "no HTTP gateway provider indexed";
+
+    it(`502s for ${cid.slice(0, 8)} when a 500 body stream refuses to cancel`, async () => {
+      const cache = new FakeCache();
+      const { fetch: fetchImpl } = stubFetch({ response: rejectingStream(500) });
+      const deps = makeDeps(fetchImpl, cache);
+      const resp = await handle(
+        get("https://redirect.example.com/retrieve/" + cid),
+        cid,
+        {},
+        deps
+      );
+      await flush(deps);
+      expect(resp.status).toBe(502);
+      expect(resp.headers.get("Cache-Control")).toBe("no-store");
+      expect(cache.putCount).toBe(0);
+    });
+
+    it(`404s for ${cid.slice(0, 8)} when a 404 body stream refuses to cancel`, async () => {
+      const cache = new FakeCache();
+      const { fetch: fetchImpl } = stubFetch({ response: rejectingStream(404) });
+      const deps = makeDeps(fetchImpl, cache);
+      const resp = await handle(
+        get("https://redirect.example.com/retrieve/" + cid),
+        cid,
+        {},
+        deps
+      );
+      await flush(deps);
+      expect(resp.status).toBe(404);
+      expect(await resp.text()).toBe(expectedBody);
+      expect(resp.headers.get("Cache-Control")).toBe("public, max-age=60");
+      expect(cache.putCount).toBe(1);
+    });
+  }
+});
+
+describe("removed gateway env", () => {
+  it("ignores a GATEWAY_URL that is no longer part of Env", async () => {
+    const { fetch: fetchImpl } = stubFetch({ body: pieceHitFixture });
+    const resp = await handle(
+      get("https://redirect.example.com/retrieve/" + PIECE_CID),
+      PIECE_CID,
+      { GATEWAY_URL: "https://gw.example.com" } as unknown as Env,
+      makeDeps(fetchImpl)
+    );
+    expect(resp.status).toBe(302);
+    expect(resp.headers.get("Location")).toBe(
+      `https://sp.example.com/piece/${PIECE_CID}`
+    );
   });
 });
