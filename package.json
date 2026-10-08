@@ -3,7 +3,6 @@
   "version": "1.0.0",
   "description": "Redirect-only router for Filecoin PieceCIDs and IPFS CIDs on Cloudflare Pages",
   "type": "module",
-  "main": "src/resolve.ts",
   "scripts": {
     "test": "vitest run",
     "typecheck": "tsc --noEmit"
