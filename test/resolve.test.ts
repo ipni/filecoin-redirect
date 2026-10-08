@@ -3,6 +3,7 @@ import { CID } from "multiformats/cid";
 import { create as createDigest } from "multiformats/hashes/digest";
 import {
   asRecord,
+  canonicalCid,
   hasGatewayHttp,
   hasPieceHttp,
   hasTransport,
@@ -27,6 +28,7 @@ const PIECE_CID = "bafkzcibcfab4grpgq6e6rva4kfuxfcvibdzx3kn2jdw6q3zqgwt5cou7j6k4
 const IPFS_CID = "bafybeihkoviema7g3gxyt6la7vd5ho32ictqbilu3wnlo3rs7ewhnp7lly";
 const CIDV0 = "QmYwAPJzv5CZsnA625s3Xf2nemtYgPpHdWEz79ojWnPbdG";
 const PIECE_V1_CID = "baga6ea4seaqao7s73y24kcutaosvacpdjgfe5pw76ooefnyqw4ynr3d2y6x2mpq";
+const BASE32_PAYLOAD_CID = "bafkreiauo4htqtbs55hyn6yt3og7zpvhfqoz4n2obstz6fn3j6nebbqg44";
 const GRAPHSYNC_GATEWAY_METADATA = btoa(String.fromCharCode(0x90, 0x12, 0xa0, 0xa0, 0x12, 0x00));
 
 describe("parseCid", () => {
@@ -53,6 +55,27 @@ describe("parseCid", () => {
   it("returns null on garbage", () => {
     expect(parseCid("notacid")).toBeNull();
     expect(parseCid("")).toBeNull();
+  });
+});
+
+describe("canonicalCid", () => {
+  it("strips base32 padding", () => {
+    for (const padded of [`${BASE32_PAYLOAD_CID}=`, `${BASE32_PAYLOAD_CID}==`]) {
+      const cid = parseCid(padded);
+      expect(cid).not.toBeNull();
+      expect(cid?.toString()).toBe(padded);
+      expect(canonicalCid(cid as never).toString()).toBe(BASE32_PAYLOAD_CID);
+    }
+  });
+
+  it("keeps an unpadded cid identical", () => {
+    const cid = parseCid(BASE32_PAYLOAD_CID) as never;
+    expect(canonicalCid(cid).toString()).toBe(BASE32_PAYLOAD_CID);
+  });
+
+  it("keeps a v0 cid unchanged", () => {
+    const cid = parseCid(CIDV0) as never;
+    expect(canonicalCid(cid).toString()).toBe(CIDV0);
   });
 });
 
@@ -306,6 +329,31 @@ describe("multiaddrToBase host rules", () => {
     );
     expect(multiaddrToBase("/dns/Sp.Example.COM/tcp/443/https")).toBe("https://Sp.Example.COM");
   });
+
+  it("rejects a host that is not plain ASCII", () => {
+    expect(multiaddrToBase(`/dns/\u212Aa.com/tcp/443/https`)).toBeNull();
+    expect(multiaddrToBase("/dns/sp.example.com/tcp/443/tls/sni/\u212Aa.com/http")).toBeNull();
+  });
+
+  it("rejects a host that the URL parser rejects", () => {
+    expect(multiaddrToBase("/dns/xn--zz.com/tcp/443/https")).toBeNull();
+    expect(multiaddrToBase("/dns/a.xn--0/tcp/443/https")).toBeNull();
+    expect(multiaddrToBase("/dns/sp.example.com/tcp/443/tls/sni/xn--zz.com/http")).toBeNull();
+  });
+});
+
+describe("multiaddrToBase ip4 value", () => {
+  it("requires a dotted quad", () => {
+    for (const bad of ["not-an-ip!!", "999.1.1.1", "1.2.3"]) {
+      expect(multiaddrToBase(`/ip4/${bad}/tcp/443/tls/sni/sp.example.com/http`)).toBeNull();
+    }
+  });
+
+  it("accepts a dotted quad and uses the sni host", () => {
+    expect(multiaddrToBase("/ip4/203.0.113.7/tcp/443/tls/sni/sp.example.com/http")).toBe(
+      "https://sp.example.com"
+    );
+  });
 });
 
 describe("pickProviderBase", () => {
@@ -366,6 +414,53 @@ describe("pickGatewayBase", () => {
       ]
     } as FindResponse;
     expect(pickGatewayBase(find)).toBeNull();
+  });
+
+  it("skips a provider whose addrs are all private", () => {
+    const find = {
+      MultihashResults: [
+        {
+          Multihash: "AA==",
+          ProviderResults: [
+            {
+              ContextID: "AA==",
+              Metadata: "oBIA",
+              Provider: {
+                ID: "12D3KooWPriv",
+                Addrs: ["/dns/localhost/tcp/443/https", "/ip4/127.0.0.1/tcp/443/https"]
+              }
+            },
+            {
+              ContextID: "Ag==",
+              Metadata: "oBIA",
+              Provider: { ID: "12D3KooWSp", Addrs: ["/dns/sp.example.com/tcp/443/https"] }
+            }
+          ]
+        }
+      ]
+    } as FindResponse;
+    expect(pickGatewayBase(find)).toBe("https://sp.example.com");
+  });
+
+  it("skips an address whose host is not a valid URL hostname", () => {
+    const find = {
+      MultihashResults: [
+        {
+          Multihash: "AA==",
+          ProviderResults: [
+            {
+              ContextID: "AA==",
+              Metadata: "oBIA",
+              Provider: {
+                ID: "12D3KooWBad",
+                Addrs: ["/dns/xn--zz.com/tcp/443/https", "/dns/sp.example.com/tcp/443/https"]
+              }
+            }
+          ]
+        }
+      ]
+    } as FindResponse;
+    expect(pickGatewayBase(find)).toBe("https://sp.example.com");
   });
 
   it("tolerates malformed shapes", () => {

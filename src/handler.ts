@@ -1,5 +1,6 @@
 import {
   asRecord,
+  canonicalCid,
   ipfsLocation,
   isPieceCid,
   parseCid,
@@ -127,10 +128,11 @@ export async function handle(
   const respond = (resp: Response): Response =>
     request.method === "HEAD" ? new Response(null, resp) : resp;
 
-  const cid = parseCid(cidParam);
-  if (cid === null) {
+  const parsed = parseCid(cidParam);
+  if (parsed === null) {
     return respond(textResponse(400, "not a CID", "no-store"));
   }
+  const cid = canonicalCid(parsed);
 
   const kind: CidKind = isPieceCid(cid) ? "piece" : "payload";
 
