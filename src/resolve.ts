@@ -356,7 +356,3 @@ export function pieceLocation(base: string, cid: CID): string {
 export function ipfsLocation(base: string, cid: CID): string {
   return `${base}/ipfs/${cid.toString()}?format=car`;
 }
-
-export function gatewayLocation(gatewayBase: string, cid: CID): string {
-  return `${gatewayBase.replace(/\/+$/, "")}/ipfs/${cid.toString()}`;
-}

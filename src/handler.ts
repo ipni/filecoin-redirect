@@ -1,15 +1,16 @@
 import {
-  gatewayLocation,
+  asRecord,
+  ipfsLocation,
   isPieceCid,
   parseCid,
   pieceLocation,
+  pickGatewayBase,
   pickProviderBase,
   type FindResponse
 } from "./resolve";
 
 export interface Env {
   INDEXER_URL?: string;
-  GATEWAY_URL?: string;
   CACHE_TTL_SECONDS?: string;
 }
 
@@ -19,10 +20,13 @@ export interface Deps {
   waitUntil(p: Promise<unknown>): void;
 }
 
+export type CidKind = "piece" | "payload";
+
 const DEFAULT_INDEXER = "https://cid.contact";
-const DEFAULT_GATEWAY = "https://inbrowser.link";
 const DEFAULT_TTL = 300;
+const MAX_TTL = 86400;
 const INDEXER_TIMEOUT_MS = 3000;
+const TTL_RE = /^\d+$/;
 
 function trimTrailingSlash(value: string): string {
   return value.replace(/\/+$/, "");
@@ -34,8 +38,15 @@ function envSetting(value: string | undefined, fallback: string): string {
 }
 
 function resolveTtl(env: Env): number {
-  const parsed = parseInt(env.CACHE_TTL_SECONDS ?? "", 10);
-  return Number.isNaN(parsed) || parsed < 1 ? DEFAULT_TTL : parsed;
+  const value = envSetting(env.CACHE_TTL_SECONDS, "");
+  if (!TTL_RE.test(value)) {
+    return DEFAULT_TTL;
+  }
+  const parsed = Number(value);
+  if (parsed < 1) {
+    return DEFAULT_TTL;
+  }
+  return parsed > MAX_TTL ? MAX_TTL : parsed;
 }
 
 function textResponse(status: number, body: string, cacheControl: string): Response {
@@ -60,22 +71,19 @@ function redirectResponse(location: string, cacheControl: string): Response {
   });
 }
 
-function noProviderResponse(): Response {
-  return textResponse(404, "no HTTP piece provider indexed", "public, max-age=60");
-}
-
-function isPlainObject(value: unknown): value is FindResponse {
-  return (
-    typeof value === "object" &&
-    value !== null &&
-    !Array.isArray(value)
-  );
+function noProviderResponse(kind: CidKind): Response {
+  const body =
+    kind === "piece"
+      ? "no HTTP piece provider indexed"
+      : "no HTTP gateway provider indexed";
+  return textResponse(404, body, "public, max-age=60");
 }
 
 async function lookupIndexer(
   deps: Deps,
   indexer: string,
-  cid: string
+  cid: string,
+  kind: CidKind
 ): Promise<FindResponse | Response> {
   let res: Response;
   try {
@@ -89,11 +97,11 @@ async function lookupIndexer(
   }
 
   if (res.status === 404) {
-    await res.body?.cancel();
-    return noProviderResponse();
+    await res.body?.cancel().catch(() => {});
+    return noProviderResponse(kind);
   }
   if (!res.ok) {
-    await res.body?.cancel();
+    await res.body?.cancel().catch(() => {});
     return textResponse(502, "indexer unavailable", "no-store");
   }
 
@@ -103,10 +111,11 @@ async function lookupIndexer(
   } catch {
     return textResponse(502, "indexer unavailable", "no-store");
   }
-  if (!isPlainObject(body)) {
+  const rec = asRecord(body);
+  if (rec === null) {
     return textResponse(502, "indexer unavailable", "no-store");
   }
-  return body;
+  return rec as FindResponse;
 }
 
 export async function handle(
@@ -123,12 +132,7 @@ export async function handle(
     return respond(textResponse(400, "not a CID", "no-store"));
   }
 
-  const gateway = trimTrailingSlash(envSetting(env.GATEWAY_URL, DEFAULT_GATEWAY));
-  if (!isPieceCid(cid)) {
-    return respond(
-      redirectResponse(gatewayLocation(gateway, cid), "public, max-age=86400")
-    );
-  }
+  const kind: CidKind = isPieceCid(cid) ? "piece" : "payload";
 
   const key = new Request(new URL("/retrieve/" + cid.toString(), request.url), {
     method: "GET"
@@ -141,7 +145,7 @@ export async function handle(
   }
 
   const indexer = trimTrailingSlash(envSetting(env.INDEXER_URL, DEFAULT_INDEXER));
-  const lookedUp = await lookupIndexer(deps, indexer, cid.toString());
+  const lookedUp = await lookupIndexer(deps, indexer, cid.toString(), kind);
   if (lookedUp instanceof Response) {
     const resp = lookedUp;
     if (deps.cache !== null && resp.status === 404) {
@@ -153,14 +157,17 @@ export async function handle(
   const ttl = resolveTtl(env);
   let base: string | null;
   try {
-    base = pickProviderBase(lookedUp);
+    base = kind === "piece" ? pickProviderBase(lookedUp) : pickGatewayBase(lookedUp);
   } catch {
     return respond(textResponse(502, "indexer unavailable", "no-store"));
   }
   const resp =
     base === null
-      ? noProviderResponse()
-      : redirectResponse(pieceLocation(base, cid), `public, max-age=${ttl}`);
+      ? noProviderResponse(kind)
+      : redirectResponse(
+          kind === "piece" ? pieceLocation(base, cid) : ipfsLocation(base, cid),
+          `public, max-age=${ttl}`
+        );
 
   if (deps.cache !== null) {
     deps.waitUntil(deps.cache.put(key, resp.clone()).catch(() => {}));

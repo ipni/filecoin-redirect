@@ -3,7 +3,6 @@ import { CID } from "multiformats/cid";
 import { create as createDigest } from "multiformats/hashes/digest";
 import {
   asRecord,
-  gatewayLocation,
   hasGatewayHttp,
   hasPieceHttp,
   hasTransport,
@@ -425,20 +424,6 @@ describe("pieceLocation", () => {
     const cid = parseCid(PIECE_CID) as never;
     expect(pieceLocation("https://sp.example.com", cid)).toBe(
       `https://sp.example.com/piece/${PIECE_CID}`
-    );
-  });
-});
-
-describe("gatewayLocation", () => {
-  it("builds the gateway url", () => {
-    const cid = parseCid(IPFS_CID) as never;
-    expect(gatewayLocation("https://inbrowser.link", cid)).toBe(`https://inbrowser.link/ipfs/${IPFS_CID}`);
-  });
-
-  it("strips a trailing slash on the gateway base", () => {
-    const cid = parseCid(IPFS_CID) as never;
-    expect(gatewayLocation("https://inbrowser.link/", cid)).toBe(
-      `https://inbrowser.link/ipfs/${IPFS_CID}`
     );
   });
 });

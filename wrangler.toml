@@ -4,5 +4,4 @@ compatibility_date = "2026-10-08"
 
 [vars]
 INDEXER_URL = "https://cid.contact"
-GATEWAY_URL = "https://inbrowser.link"
 CACHE_TTL_SECONDS = "300"
