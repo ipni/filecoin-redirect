@@ -39,7 +39,7 @@ export function parseCid(s: string): CID | null {
 }
 
 export function isPieceCid(cid: CID): boolean {
-  return cid.version === 1 && cid.multihash.code === 0x1011;
+  return cid.version === 1 && cid.code === 0x55 && cid.multihash.code === 0x1011;
 }
 
 function decodeBase64(b64: string): Uint8Array | null {
@@ -193,8 +193,8 @@ function parseMultiaddrTail(segments: string[]): MultiaddrTail | null {
     if (!PATH_RE.test(decoded)) {
       return null;
     }
-    for (const segment of decoded.split("/")) {
-      if (segment === "..") {
+    for (const segment of decoded.split("/").slice(1)) {
+      if (segment === "" || segment === "." || segment === "..") {
         return null;
       }
     }
@@ -251,13 +251,37 @@ export function multiaddrToBase(ma: string): string | null {
   return `https://${authority}${portSuffix}${tail.path}`;
 }
 
+function toArray(value: unknown): unknown[] {
+  return Array.isArray(value) ? value : [];
+}
+
+function toRecord(value: unknown): Record<string, unknown> | null {
+  return typeof value === "object" && value !== null && !Array.isArray(value)
+    ? (value as Record<string, unknown>)
+    : null;
+}
+
 export function pickProviderBase(find: FindResponse): string | null {
-  for (const multihashResult of find.MultihashResults ?? []) {
-    for (const providerResult of multihashResult.ProviderResults ?? []) {
-      if (!hasPieceHttp(providerResult.Metadata ?? "")) {
+  for (const multihashValue of toArray(find.MultihashResults)) {
+    const multihashResult = toRecord(multihashValue);
+    if (multihashResult === null) {
+      continue;
+    }
+    for (const providerValue of toArray(multihashResult.ProviderResults)) {
+      const providerResult = toRecord(providerValue);
+      if (providerResult === null) {
         continue;
       }
-      for (const addr of providerResult.Provider?.Addrs ?? []) {
+      const metadata =
+        typeof providerResult.Metadata === "string" ? providerResult.Metadata : "";
+      if (!hasPieceHttp(metadata)) {
+        continue;
+      }
+      const provider = toRecord(providerResult.Provider);
+      for (const addr of toArray(provider?.Addrs)) {
+        if (typeof addr !== "string") {
+          continue;
+        }
         const base = multiaddrToBase(addr);
         if (base !== null) {
           return base;

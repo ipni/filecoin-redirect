@@ -354,3 +354,147 @@ describe("errors and methods", () => {
     expect(missResp.headers.get("Content-Type")).toBe("text/plain; charset=utf-8");
   });
 });
+
+describe("malformed indexer bodies", () => {
+  const bodies: unknown[] = [
+    { MultihashResults: 5 },
+    { MultihashResults: {} },
+    { MultihashResults: [null] },
+    { MultihashResults: [{ ProviderResults: [null] }] },
+    {
+      MultihashResults: [
+        { ProviderResults: [{ Metadata: "sBIA", Provider: { Addrs: [5] } }] }
+      ]
+    }
+  ];
+  bodies.forEach((body, i) => {
+    it(`never throws and 404s (cached) when nothing is usable (case ${i})`, async () => {
+      const cache = new FakeCache();
+      const { fetch: fetchImpl } = stubFetch({ body });
+      const deps = makeDeps(fetchImpl, cache);
+      const resp = await handle(
+        get("https://redirect.example.com/retrieve/" + PIECE_CID),
+        PIECE_CID,
+        {},
+        deps
+      );
+      await flush(deps);
+      expect(resp.status).toBe(404);
+      expect(resp.headers.get("Cache-Control")).toBe("public, max-age=60");
+      expect(cache.putCount).toBe(1);
+    });
+  });
+});
+
+describe("blank env settings fall back to defaults", () => {
+  for (const blank of ["", "   ", "\t"]) {
+    it(`uses the default gateway for GATEWAY_URL ${JSON.stringify(blank)}`, async () => {
+      const { fetch: fetchImpl } = stubFetch();
+      const resp = await handle(
+        get("https://redirect.example.com/retrieve/" + IPFS_CID),
+        IPFS_CID,
+        { GATEWAY_URL: blank },
+        makeDeps(fetchImpl)
+      );
+      expect(resp.headers.get("Location")).toBe(
+        `https://inbrowser.link/ipfs/${IPFS_CID}`
+      );
+    });
+
+    it(`uses the default indexer for INDEXER_URL ${JSON.stringify(blank)}`, async () => {
+      const { fetch: fetchImpl, calls } = stubFetch({ body: pieceHitFixture });
+      const resp = await handle(
+        get("https://redirect.example.com/retrieve/" + PIECE_CID),
+        PIECE_CID,
+        { INDEXER_URL: blank },
+        makeDeps(fetchImpl)
+      );
+      expect(resp.status).toBe(302);
+      expect(calls[0]?.url).toBe(`https://cid.contact/cid/${PIECE_CID}`);
+    });
+  }
+});
+
+describe("cache failures", () => {
+  it("treats a rejecting cache.match as a miss and swallows a rejecting cache.put", async () => {
+    const cache = {
+      match: async () => {
+        throw new Error("cache down");
+      },
+      put: async () => {
+        throw new Error("cache write down");
+      }
+    } as unknown as Pick<Cache, "match" | "put">;
+    const { fetch: fetchImpl, calls } = stubFetch({ body: pieceHitFixture });
+    const deps = makeDeps(fetchImpl, cache);
+    const resp = await handle(
+      get("https://redirect.example.com/retrieve/" + PIECE_CID),
+      PIECE_CID,
+      {},
+      deps
+    );
+    await flush(deps);
+    expect(resp.status).toBe(302);
+    expect(resp.headers.get("Location")).toBe(`https://sp.example.com/piece/${PIECE_CID}`);
+    expect(calls).toHaveLength(1);
+  });
+});
+
+describe("indexer request details and env overrides", () => {
+  it("builds the fetch URL without a double slash for a trailing-slash INDEXER_URL", async () => {
+    const { fetch: fetchImpl, calls } = stubFetch({ body: pieceHitFixture });
+    const resp = await handle(
+      get("https://redirect.example.com/retrieve/" + PIECE_CID),
+      PIECE_CID,
+      { INDEXER_URL: "https://indexer.example.com/" },
+      makeDeps(fetchImpl)
+    );
+    expect(resp.status).toBe(302);
+    expect(resp.headers.get("Location")).toBe(`https://sp.example.com/piece/${PIECE_CID}`);
+    expect(calls[0]?.url).toBe(`https://indexer.example.com/cid/${PIECE_CID}`);
+    expect(calls[0]?.url).not.toContain("//cid/");
+  });
+
+  it("honours a valid custom CACHE_TTL_SECONDS", async () => {
+    const { fetch: fetchImpl } = stubFetch({ body: pieceHitFixture });
+    const resp = await handle(
+      get("https://redirect.example.com/retrieve/" + PIECE_CID),
+      PIECE_CID,
+      { CACHE_TTL_SECONDS: "60" },
+      makeDeps(fetchImpl)
+    );
+    expect(resp.headers.get("Cache-Control")).toBe("public, max-age=60");
+  });
+
+  it("502s without caching when the indexer body is not valid JSON", async () => {
+    const cache = new FakeCache();
+    const { fetch: fetchImpl } = stubFetch({
+      response: new Response("this is not json {", { status: 200 })
+    });
+    const deps = makeDeps(fetchImpl, cache);
+    const resp = await handle(
+      get("https://redirect.example.com/retrieve/" + PIECE_CID),
+      PIECE_CID,
+      {},
+      deps
+    );
+    await flush(deps);
+    expect(resp.status).toBe(502);
+    expect(resp.headers.get("Cache-Control")).toBe("no-store");
+    expect(cache.putCount).toBe(0);
+  });
+
+  it("sends Accept: application/json and an abort signal to the indexer", async () => {
+    const { fetch: fetchImpl, calls } = stubFetch({ body: pieceHitFixture });
+    await handle(
+      get("https://redirect.example.com/retrieve/" + PIECE_CID),
+      PIECE_CID,
+      {},
+      makeDeps(fetchImpl)
+    );
+    const init = calls[0]?.init;
+    const headers = init?.headers as Record<string, string> | undefined;
+    expect(headers?.Accept).toBe("application/json");
+    expect(init?.signal).toBeInstanceOf(AbortSignal);
+  });
+});
