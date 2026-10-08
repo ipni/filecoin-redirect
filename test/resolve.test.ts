@@ -2,15 +2,21 @@ import { describe, expect, it } from "vitest";
 import { CID } from "multiformats/cid";
 import { create as createDigest } from "multiformats/hashes/digest";
 import {
+  asRecord,
   gatewayLocation,
+  hasGatewayHttp,
   hasPieceHttp,
+  hasTransport,
+  ipfsLocation,
   isPieceCid,
   multiaddrToBase,
   parseCid,
   pieceLocation,
+  pickGatewayBase,
   pickProviderBase,
   type FindResponse
 } from "../src/resolve";
+import bothFixture from "./fixtures/both.json";
 import emptyFixture from "./fixtures/empty.json";
 import gatewayOnlyFixture from "./fixtures/gateway-only.json";
 import httpPathFixture from "./fixtures/http-path.json";
@@ -22,6 +28,7 @@ const PIECE_CID = "bafkzcibcfab4grpgq6e6rva4kfuxfcvibdzx3kn2jdw6q3zqgwt5cou7j6k4
 const IPFS_CID = "bafybeihkoviema7g3gxyt6la7vd5ho32ictqbilu3wnlo3rs7ewhnp7lly";
 const CIDV0 = "QmYwAPJzv5CZsnA625s3Xf2nemtYgPpHdWEz79ojWnPbdG";
 const PIECE_V1_CID = "baga6ea4seaqao7s73y24kcutaosvacpdjgfe5pw76ooefnyqw4ynr3d2y6x2mpq";
+const GRAPHSYNC_GATEWAY_METADATA = btoa(String.fromCharCode(0x90, 0x12, 0xa0, 0xa0, 0x12, 0x00));
 
 describe("parseCid", () => {
   it("parses a piece cid", () => {
@@ -116,6 +123,40 @@ describe("hasPieceHttp", () => {
   });
 });
 
+describe("hasTransport and hasGatewayHttp", () => {
+  it("accepts a lone gateway-http entry", () => {
+    expect(hasGatewayHttp("oBIA")).toBe(true);
+    expect(hasTransport("oBIA", 0x0920)).toBe(true);
+  });
+
+  it("separates gateway-http from piece-http", () => {
+    expect(hasGatewayHttp("sBIA")).toBe(false);
+    expect(hasPieceHttp("sBIA")).toBe(true);
+  });
+
+  it("accepts both codes in one record", () => {
+    expect(hasGatewayHttp("oBIAsBIA")).toBe(true);
+    expect(hasPieceHttp("oBIAsBIA")).toBe(true);
+  });
+
+  it("accepts bitswap before gateway-http", () => {
+    expect(hasGatewayHttp("gBKgEgA=")).toBe(true);
+  });
+
+  it("rejects graphsync first", () => {
+    expect(hasGatewayHttp(GRAPHSYNC_GATEWAY_METADATA)).toBe(false);
+    expect(hasPieceHttp(GRAPHSYNC_GATEWAY_METADATA)).toBe(false);
+    expect(hasTransport(GRAPHSYNC_GATEWAY_METADATA, 0x0920)).toBe(false);
+  });
+
+  it("rejects empty and invalid base64", () => {
+    expect(hasGatewayHttp("")).toBe(false);
+    expect(hasGatewayHttp("!!!")).toBe(false);
+    expect(hasTransport("", 0x0920)).toBe(false);
+    expect(hasTransport("!!!", 0x0920)).toBe(false);
+  });
+});
+
 describe("multiaddrToBase", () => {
   it("accepts /dns", () => {
     expect(multiaddrToBase("/dns/sp.example.com/https")).toBe("https://sp.example.com");
@@ -129,8 +170,21 @@ describe("multiaddrToBase", () => {
     expect(multiaddrToBase("/dns6/sp.example.com/https")).toBe("https://sp.example.com");
   });
 
-  it("accepts /ip4", () => {
-    expect(multiaddrToBase("/ip4/198.51.100.7/https")).toBe("https://198.51.100.7");
+  it("accepts /ip4 only with a public sni name", () => {
+    expect(multiaddrToBase("/ip4/198.51.100.7/https")).toBeNull();
+    expect(multiaddrToBase("/ip4/198.51.100.7/tcp/443/tls/http")).toBeNull();
+    expect(multiaddrToBase("/ip4/198.51.100.7/tcp/443/tls/sni/sp.example.com/http")).toBe(
+      "https://sp.example.com"
+    );
+    expect(multiaddrToBase("/ip4/198.51.100.7/tcp/443/tls/sni/localhost/http")).toBeNull();
+  });
+
+  it("rejects an sni name that is not public", () => {
+    expect(multiaddrToBase("/dns/sp.example.com/tcp/443/tls/sni/localhost/http")).toBeNull();
+  });
+
+  it("rejects a dns value that is not public even with a good sni", () => {
+    expect(multiaddrToBase("/dns4/localhost/tcp/443/tls/sni/sp.example.com/http")).toBeNull();
   });
 
   it("accepts /tls/http", () => {
@@ -208,6 +262,53 @@ describe("multiaddrToBase", () => {
   });
 });
 
+describe("multiaddrToBase host rules", () => {
+  const rejected = [
+    "localhost",
+    "foo.localhost",
+    "printer.local",
+    "db.internal",
+    "router.lan",
+    "single",
+    "10.0.0.5",
+    "169.254.169.254",
+    "0x7f.0.0.0x1",
+    "127.0.0.0x1",
+    "0x7f.0x1",
+    "1.2.3.0x10",
+    "PRINTER.LOCAL",
+    "Foo.LocalHost",
+    "x.ARPA",
+    "sp.example.com.",
+    "a_b.example.com",
+    "127.1",
+    "0x7f.0.0.1",
+    "2130706433",
+    "-bad.example.com",
+    "bad-.example.com",
+    "a..example.com",
+    `${"a".repeat(64)}.example.com`,
+    `${`${"a".repeat(63)}.`.repeat(5)}com`
+  ];
+
+  it("rejects private, local and numeric hosts", () => {
+    for (const host of rejected) {
+      expect(multiaddrToBase(`/dns/${host}/tcp/443/https`)).toBeNull();
+    }
+  });
+
+  it("accepts ordinary domain names and keeps their case", () => {
+    expect(multiaddrToBase("/dns/sp.example.com/tcp/443/https")).toBe("https://sp.example.com");
+    expect(multiaddrToBase("/dns/a-b.example.co.uk/tcp/443/https")).toBe(
+      "https://a-b.example.co.uk"
+    );
+    expect(multiaddrToBase("/dns/xn--e1afmkfd.example.org/tcp/443/https")).toBe(
+      "https://xn--e1afmkfd.example.org"
+    );
+    expect(multiaddrToBase("/dns/Sp.Example.COM/tcp/443/https")).toBe("https://Sp.Example.COM");
+  });
+});
+
 describe("pickProviderBase", () => {
   it("picks the piece-http provider", () => {
     expect(pickProviderBase(pieceHitFixture as FindResponse)).toBe("https://sp.example.com");
@@ -233,6 +334,89 @@ describe("pickProviderBase", () => {
     expect(pickProviderBase(nullProvidersFixture as FindResponse)).toBe(
       "https://sp2.example.com:8443"
     );
+  });
+});
+
+describe("pickGatewayBase", () => {
+  it("picks the gateway-http provider", () => {
+    expect(pickGatewayBase(gatewayOnlyFixture as FindResponse)).toBe("https://gw.example.com");
+  });
+
+  it("returns null when only piece-http metadata exists", () => {
+    expect(pickGatewayBase(pieceHitFixture as FindResponse)).toBeNull();
+  });
+
+  it("picks a record that carries both codes", () => {
+    expect(pickGatewayBase(bothFixture as FindResponse)).toBe("https://sp.example.com");
+    expect(pickProviderBase(bothFixture as FindResponse)).toBe("https://sp.example.com");
+  });
+
+  it("returns null when graphsync comes before gateway-http", () => {
+    const find = {
+      MultihashResults: [
+        {
+          Multihash: "AA==",
+          ProviderResults: [
+            {
+              ContextID: "AA==",
+              Metadata: GRAPHSYNC_GATEWAY_METADATA,
+              Provider: { ID: "12D3KooWGw", Addrs: ["/dns/gw.example.com/tcp/443/https"] }
+            }
+          ]
+        }
+      ]
+    } as FindResponse;
+    expect(pickGatewayBase(find)).toBeNull();
+  });
+
+  it("tolerates malformed shapes", () => {
+    expect(pickGatewayBase(emptyFixture as FindResponse)).toBeNull();
+    expect(pickGatewayBase({} as FindResponse)).toBeNull();
+    expect(pickGatewayBase({ MultihashResults: 5 } as unknown as FindResponse)).toBeNull();
+    expect(pickGatewayBase({ MultihashResults: [null] } as unknown as FindResponse)).toBeNull();
+    expect(
+      pickGatewayBase({
+        MultihashResults: [{ ProviderResults: [{ Metadata: "oBIA", Provider: { Addrs: [5] } }] }]
+      } as unknown as FindResponse)
+    ).toBeNull();
+    expect(pickProviderBase({ MultihashResults: [null] } as unknown as FindResponse)).toBeNull();
+  });
+});
+
+describe("ipfsLocation", () => {
+  it("builds the trustless gateway url for a cidv1", () => {
+    const cid = parseCid(IPFS_CID) as never;
+    expect(ipfsLocation("https://gw.example.com", cid)).toBe(
+      `https://gw.example.com/ipfs/${IPFS_CID}?format=car`
+    );
+  });
+
+  it("builds the trustless gateway url for a cidv0", () => {
+    const cid = parseCid(CIDV0) as never;
+    expect(ipfsLocation("https://gw.example.com", cid)).toBe(
+      `https://gw.example.com/ipfs/${CIDV0}?format=car`
+    );
+  });
+
+  it("keeps a base with a path", () => {
+    const cid = parseCid(IPFS_CID) as never;
+    expect(ipfsLocation("https://sp.example.com/sp1", cid)).toBe(
+      `https://sp.example.com/sp1/ipfs/${IPFS_CID}?format=car`
+    );
+  });
+});
+
+describe("asRecord", () => {
+  it("returns the object itself", () => {
+    const value = { a: 1 };
+    expect(asRecord(value)).toBe(value);
+  });
+
+  it("returns null for anything else", () => {
+    expect(asRecord(null)).toBeNull();
+    expect(asRecord([])).toBeNull();
+    expect(asRecord("x")).toBeNull();
+    expect(asRecord(5)).toBeNull();
   });
 });
 
