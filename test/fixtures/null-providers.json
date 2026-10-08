@@ -1,0 +1,21 @@
+{
+  "MultihashResults": [
+    {
+      "Multihash": "AA==",
+      "ProviderResults": null
+    },
+    {
+      "Multihash": "Ag==",
+      "ProviderResults": [
+        {
+          "ContextID": "Ag==",
+          "Metadata": "sBIA",
+          "Provider": {
+            "ID": "12D3KooWSp",
+            "Addrs": ["/dns4/sp2.example.com/tcp/8443/tls/sni/sp2.example.com/http"]
+          }
+        }
+      ]
+    }
+  ]
+}
