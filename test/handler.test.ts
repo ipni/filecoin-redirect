@@ -11,6 +11,8 @@ const PIECE_CID = "bafkzcibcfab4grpgq6e6rva4kfuxfcvibdzx3kn2jdw6q3zqgwt5cou7j6k4
 const PIECE_CID_BASE36 = CID.parse(PIECE_CID).toString(base36);
 const IPFS_CID = "bafybeigdyrzt5sfp7udm7hu76uh7y26nf3efuylqabf3oclgtqy55fbzdi";
 const CIDV0 = "QmYwAPJzv5CZsnA625s3Xf2nemtYgPpHdWEz79ojWnPbdG";
+const PADDED_IPFS_CID = `${IPFS_CID}=`;
+const PADDED_PIECE_CID = `${PIECE_CID}=`;
 
 class FakeCache implements Pick<Cache, "match" | "put"> {
   readonly entries = new Map<string, Response>();
@@ -211,6 +213,109 @@ describe("payload CID path", () => {
     expect(resp.status).toBe(502);
     expect(resp.headers.get("Cache-Control")).toBe("no-store");
     expect(cache.putCount).toBe(0);
+  });
+});
+
+describe("canonical cid spelling", () => {
+  it("treats a padded payload cid exactly like the unpadded one", async () => {
+    const cache = new FakeCache();
+    const { fetch: fetchImpl, calls } = stubFetch({ body: gatewayOnlyFixture });
+    const deps = makeDeps(fetchImpl, cache);
+    const resp = await handle(
+      get("https://redirect.example.com/retrieve/" + PADDED_IPFS_CID),
+      PADDED_IPFS_CID,
+      {},
+      deps
+    );
+    await flush(deps);
+    expect(resp.status).toBe(302);
+    expect(resp.headers.get("Location")).toBe(
+      `https://gw.example.com/ipfs/${IPFS_CID}?format=car`
+    );
+    expect(calls).toHaveLength(1);
+    expect(calls[0]?.url).toBe(`https://cid.contact/cid/${IPFS_CID}`);
+    expect([...cache.entries.keys()]).toEqual([
+      `https://redirect.example.com/retrieve/${IPFS_CID}`
+    ]);
+
+    const second = stubFetch({ throws: true });
+    const again = await handle(
+      get("https://redirect.example.com/retrieve/" + IPFS_CID),
+      IPFS_CID,
+      {},
+      makeDeps(second.fetch, cache)
+    );
+    expect(again.status).toBe(302);
+    expect(again.headers.get("Location")).toBe(
+      `https://gw.example.com/ipfs/${IPFS_CID}?format=car`
+    );
+    expect(second.calls).toHaveLength(0);
+  });
+
+  it("treats a padded piece cid exactly like the unpadded one", async () => {
+    const cache = new FakeCache();
+    const { fetch: fetchImpl, calls } = stubFetch({ body: pieceHitFixture });
+    const deps = makeDeps(fetchImpl, cache);
+    const resp = await handle(
+      get("https://redirect.example.com/retrieve/" + PADDED_PIECE_CID),
+      PADDED_PIECE_CID,
+      {},
+      deps
+    );
+    await flush(deps);
+    expect(resp.status).toBe(302);
+    expect(resp.headers.get("Location")).toBe(`https://sp.example.com/piece/${PIECE_CID}`);
+    expect(calls).toHaveLength(1);
+    expect(calls[0]?.url).toBe(`https://cid.contact/cid/${PIECE_CID}`);
+    expect([...cache.entries.keys()]).toEqual([
+      `https://redirect.example.com/retrieve/${PIECE_CID}`
+    ]);
+
+    const second = stubFetch({ throws: true });
+    const again = await handle(
+      get("https://redirect.example.com/retrieve/" + PIECE_CID),
+      PIECE_CID,
+      {},
+      makeDeps(second.fetch, cache)
+    );
+    expect(again.status).toBe(302);
+    expect(again.headers.get("Location")).toBe(`https://sp.example.com/piece/${PIECE_CID}`);
+    expect(second.calls).toHaveLength(0);
+  });
+
+  it("404s and caches when every gateway-http address is private", async () => {
+    const cache = new FakeCache();
+    const body = {
+      MultihashResults: [
+        {
+          Multihash: "AA==",
+          ProviderResults: [
+            {
+              ContextID: "AA==",
+              Metadata: "oBIA",
+              Provider: {
+                ID: "12D3KooWPriv",
+                Addrs: ["/dns/localhost/tcp/443/https", "/ip4/127.0.0.1/tcp/443/https"]
+              }
+            }
+          ]
+        }
+      ]
+    };
+    const { fetch: fetchImpl } = stubFetch({ body });
+    const deps = makeDeps(fetchImpl, cache);
+    const resp = await handle(
+      get("https://redirect.example.com/retrieve/" + IPFS_CID),
+      IPFS_CID,
+      {},
+      deps
+    );
+    await flush(deps);
+    expect(resp.status).toBe(404);
+    expect(resp.headers.get("Location")).toBeNull();
+    expect(await resp.text()).toBe("no HTTP gateway provider indexed");
+    expect(resp.headers.get("Cache-Control")).toBe("public, max-age=60");
+    expect(cache.putCount).toBe(1);
   });
 });
 

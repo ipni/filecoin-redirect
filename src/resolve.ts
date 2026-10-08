@@ -27,6 +27,7 @@ const GRAPHSYNC = 0x0910;
 const MAX_UVARINT_BYTES = 9;
 const MAX_UVARINT_VALUE = Number.MAX_SAFE_INTEGER;
 
+const ASCII_HOST_RE = /^[A-Za-z0-9.-]+$/;
 const LABEL_RE = /^[a-z0-9-]{1,63}$/;
 const NUMERIC_LABEL_RE = /^([0-9]+|0x[0-9a-f]*)$/i;
 const LOCAL_SUFFIXES = [
@@ -49,6 +50,10 @@ export function parseCid(s: string): CID | null {
   } catch {
     return null;
   }
+}
+
+export function canonicalCid(cid: CID): CID {
+  return CID.decode(cid.bytes);
 }
 
 export function isPieceCid(cid: CID): boolean {
@@ -140,6 +145,9 @@ export function hasGatewayHttp(b64: string): boolean {
 }
 
 function isPublicHost(name: string): boolean {
+  if (!ASCII_HOST_RE.test(name)) {
+    return false;
+  }
   const lower = name.toLowerCase();
   if (lower.length === 0 || lower.length > MAX_HOST_LENGTH) {
     return false;
@@ -258,6 +266,16 @@ function parseMultiaddrTail(segments: string[]): MultiaddrTail | null {
   return { port, sniHost, path, end: index };
 }
 
+function isDottedQuad(value: string): boolean {
+  const parts = value.split(".");
+  if (parts.length !== 4) {
+    return false;
+  }
+  return parts.every(
+    (part) => /^[0-9]{1,3}$/.test(part) && Number(part) <= 255
+  );
+}
+
 export function multiaddrToBase(ma: string): string | null {
   if (!ma.startsWith("/")) {
     return null;
@@ -272,7 +290,14 @@ export function multiaddrToBase(ma: string): string | null {
   const protocol = segments[0];
   if (protocol === "dns" || protocol === "dns4" || protocol === "dns6" || protocol === "ip4") {
     const value = segments[1];
-    if (value === undefined || (protocol !== "ip4" && !isPublicHost(value))) {
+    if (value === undefined) {
+      return null;
+    }
+    if (protocol === "ip4") {
+      if (!isDottedQuad(value)) {
+        return null;
+      }
+    } else if (!isPublicHost(value)) {
       return null;
     }
     host = value;
@@ -297,7 +322,16 @@ export function multiaddrToBase(ma: string): string | null {
 
   const authority = tail.sniHost ?? host;
   const portSuffix = tail.port === null || tail.port === 443 ? "" : `:${tail.port}`;
-  return `https://${authority}${portSuffix}${tail.path}`;
+  const base = `https://${authority}${portSuffix}${tail.path}`;
+  try {
+    const url = new URL(base);
+    if (url.hostname !== authority.toLowerCase()) {
+      return null;
+    }
+  } catch {
+    return null;
+  }
+  return base;
 }
 
 function toArray(value: unknown): unknown[] {
