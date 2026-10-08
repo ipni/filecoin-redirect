@@ -1,0 +1,17 @@
+{
+  "MultihashResults": [
+    {
+      "Multihash": "AA==",
+      "ProviderResults": [
+        {
+          "ContextID": "AA==",
+          "Metadata": "oBIAsBIA",
+          "Provider": {
+            "ID": "12D3KooWBoth",
+            "Addrs": ["/dns/sp.example.com/tcp/443/https"]
+          }
+        }
+      ]
+    }
+  ]
+}

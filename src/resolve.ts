@@ -1,6 +1,7 @@
 import { CID } from "multiformats/cid";
 
 export const PIECE_HTTP = 0x0930;
+export const GATEWAY_HTTP = 0x0920;
 
 export interface ProviderResult {
   ContextID?: string;
@@ -26,7 +27,19 @@ const GRAPHSYNC = 0x0910;
 const MAX_UVARINT_BYTES = 9;
 const MAX_UVARINT_VALUE = Number.MAX_SAFE_INTEGER;
 
-const HOST_RE = /^[a-z0-9.-]+$/i;
+const LABEL_RE = /^[a-z0-9-]{1,63}$/;
+const NUMERIC_LABEL_RE = /^([0-9]+|0x[0-9a-f]*)$/i;
+const LOCAL_SUFFIXES = [
+  ".localhost",
+  ".local",
+  ".localdomain",
+  ".internal",
+  ".lan",
+  ".home",
+  ".arpa"
+];
+const MAX_HOST_LENGTH = 253;
+
 const PORT_RE = /^[0-9]+$/;
 const PATH_RE = /^[A-Za-z0-9._~/-]*$/;
 
@@ -88,34 +101,67 @@ function fitsInBuffer(bytes: Uint8Array, value: number, end: number): boolean {
   return Number.isSafeInteger(value) && value <= bytes.length - end;
 }
 
-export function hasPieceHttp(b64: string): boolean {
+export function hasTransport(b64: string, code: number): boolean {
   const bytes = decodeBase64(b64);
   if (bytes === null) {
     return false;
   }
   let offset = 0;
   while (offset < bytes.length) {
-    const code = readUvarint(bytes, offset);
-    if (code === null) {
+    const entry = readUvarint(bytes, offset);
+    if (entry === null) {
       return false;
     }
-    offset = code.offset;
-    if (code.value === GRAPHSYNC) {
+    offset = entry.offset;
+    if (entry.value === GRAPHSYNC) {
       return false;
     }
-    if (code.value === BITSWAP) {
+    if (entry.value === BITSWAP) {
       continue;
     }
     const length = readUvarint(bytes, offset);
     if (length === null || !fitsInBuffer(bytes, length.value, length.offset)) {
       return false;
     }
-    if (code.value === PIECE_HTTP) {
+    if (entry.value === code) {
       return true;
     }
     offset = length.offset + length.value;
   }
   return false;
+}
+
+export function hasPieceHttp(b64: string): boolean {
+  return hasTransport(b64, PIECE_HTTP);
+}
+
+export function hasGatewayHttp(b64: string): boolean {
+  return hasTransport(b64, GATEWAY_HTTP);
+}
+
+function isPublicHost(name: string): boolean {
+  const lower = name.toLowerCase();
+  if (lower.length === 0 || lower.length > MAX_HOST_LENGTH) {
+    return false;
+  }
+  if (lower === "localhost") {
+    return false;
+  }
+  for (const suffix of LOCAL_SUFFIXES) {
+    if (lower.endsWith(suffix)) {
+      return false;
+    }
+  }
+  const labels = lower.split(".");
+  if (labels.length < 2) {
+    return false;
+  }
+  for (const label of labels) {
+    if (!LABEL_RE.test(label) || label.startsWith("-") || label.endsWith("-")) {
+      return false;
+    }
+  }
+  return !NUMERIC_LABEL_RE.test(labels[labels.length - 1]);
 }
 
 interface MultiaddrTail {
@@ -154,7 +200,7 @@ function parseMultiaddrTail(segments: string[]): MultiaddrTail | null {
     } else if (next === "sni") {
       index++;
       const sni = segments[index];
-      if (sni === undefined || !HOST_RE.test(sni)) {
+      if (sni === undefined || !isPublicHost(sni)) {
         return null;
       }
       sniHost = sni;
@@ -226,7 +272,7 @@ export function multiaddrToBase(ma: string): string | null {
   const protocol = segments[0];
   if (protocol === "dns" || protocol === "dns4" || protocol === "dns6" || protocol === "ip4") {
     const value = segments[1];
-    if (value === undefined || !HOST_RE.test(value)) {
+    if (value === undefined || (protocol !== "ip4" && !isPublicHost(value))) {
       return null;
     }
     host = value;
@@ -245,6 +291,9 @@ export function multiaddrToBase(ma: string): string | null {
   if (rest.length !== tail.end) {
     return null;
   }
+  if (protocol === "ip4" && tail.sniHost === null) {
+    return null;
+  }
 
   const authority = tail.sniHost ?? host;
   const portSuffix = tail.port === null || tail.port === 443 ? "" : `:${tail.port}`;
@@ -255,29 +304,29 @@ function toArray(value: unknown): unknown[] {
   return Array.isArray(value) ? value : [];
 }
 
-function toRecord(value: unknown): Record<string, unknown> | null {
+export function asRecord(value: unknown): Record<string, unknown> | null {
   return typeof value === "object" && value !== null && !Array.isArray(value)
     ? (value as Record<string, unknown>)
     : null;
 }
 
-export function pickProviderBase(find: FindResponse): string | null {
+function pickBase(find: FindResponse, code: number): string | null {
   for (const multihashValue of toArray(find.MultihashResults)) {
-    const multihashResult = toRecord(multihashValue);
+    const multihashResult = asRecord(multihashValue);
     if (multihashResult === null) {
       continue;
     }
     for (const providerValue of toArray(multihashResult.ProviderResults)) {
-      const providerResult = toRecord(providerValue);
+      const providerResult = asRecord(providerValue);
       if (providerResult === null) {
         continue;
       }
       const metadata =
         typeof providerResult.Metadata === "string" ? providerResult.Metadata : "";
-      if (!hasPieceHttp(metadata)) {
+      if (!hasTransport(metadata, code)) {
         continue;
       }
-      const provider = toRecord(providerResult.Provider);
+      const provider = asRecord(providerResult.Provider);
       for (const addr of toArray(provider?.Addrs)) {
         if (typeof addr !== "string") {
           continue;
@@ -292,8 +341,20 @@ export function pickProviderBase(find: FindResponse): string | null {
   return null;
 }
 
+export function pickProviderBase(find: FindResponse): string | null {
+  return pickBase(find, PIECE_HTTP);
+}
+
+export function pickGatewayBase(find: FindResponse): string | null {
+  return pickBase(find, GATEWAY_HTTP);
+}
+
 export function pieceLocation(base: string, cid: CID): string {
   return `${base}/piece/${cid.toString()}`;
+}
+
+export function ipfsLocation(base: string, cid: CID): string {
+  return `${base}/ipfs/${cid.toString()}?format=car`;
 }
 
 export function gatewayLocation(gatewayBase: string, cid: CID): string {
