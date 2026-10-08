@@ -1,6 +1,6 @@
 # filecoin-redirect
 
-A redirect-only router on Cloudflare Pages. Given a CID it never proxies or fetches content; every response is one redirect or an error. `GET /retrieve/{cid}`: every valid CID is looked up on cid.contact and redirected straight to the provider's trustless gateway.
+A redirect-only router on Cloudflare Pages. Given a CID it never proxies or fetches content; every response is one redirect or an error. `GET /retrieve/{cid}`: every valid CID is looked up on cid.contact and redirected straight to a provider: a PieceCID v2 to its `/piece/` endpoint, any other CID to its trustless gateway at `/ipfs/`.
 
 ## Contract
 
@@ -39,7 +39,7 @@ scripts/smoke.sh http://localhost:8788 bafkreiauo4htqtbs55hyn6yt3og7zpvhfqoz4n2o
 
 ## Deploy
 
-Connect the repo to Cloudflare Pages in the dashboard (Pages Git integration). No build command is needed; the output directory is read from `wrangler.toml`. Each push to `main` installs dependencies, builds `functions/` and serves `public/`.
+Connect the repo to Cloudflare Pages in the dashboard (Pages Git integration). Set the build command to `npm ci` in the project settings (it cannot be set in `wrangler.toml`); the output directory is read from `wrangler.toml`. Without a build command Pages skips the dependency install and the Functions build fails with `Could not resolve "multiformats/cid"`. Each push to `main` then installs dependencies, builds `functions/` and serves `public/`.
 
 ## Known limitations
 
