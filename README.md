@@ -8,7 +8,7 @@ A redirect-only router on Cloudflare Pages. Given a CID it never proxies or fetc
 - Every other valid CID (payload CID): cid.contact lookup, 302 to `{provider}/ipfs/{cid}?format=car` for the first provider advertising gateway-http (0x0920) with an https address; same cache TTL.
 - No matching provider: 404, `public, max-age=60`, body `no HTTP piece provider indexed` (piece) or `no HTTP gateway provider indexed` (payload). Indexer failure or timeout: 502, not cached.
 - Accepted CIDs are written in base32, base36 or base58btc (CIDv0 `Qm...`); anything else, including other multibase encodings, gets 400.
-- Provider URLs are filtered: only public-looking DNS names are accepted (no IP literals, localhost or private-looking names). The first matching provider wins; there is no ranking, no liveness check and no fallback.
+- Provider URLs are filtered: only public-looking DNS names are accepted (no IP literals, localhost or private-looking names). The filter looks at the name only and cannot resolve DNS, so a public name that points at a private address (for example a `nip.io` or `sslip.io` name) is not caught. The first matching provider wins; there is no ranking, no liveness check and no fallback.
 - `Access-Control-Allow-Origin: *` on every GET and HEAD response.
 - The service never fetches, proxies, caches or verifies content; the provider is whoever announced the CID to IPNI, so clients should verify what they receive (a CAR carries its root CID).
 - Payload CIDs download as CARs rather than render in a browser. Providers typically send wildcard CORS, so browser `fetch()` usually works (not guaranteed).
@@ -46,6 +46,7 @@ Connect the repo to Cloudflare Pages in the dashboard (Pages Git integration). S
 - The first matching provider wins; there is no ranking, no liveness check and no fallback.
 - Many CIDs (bitswap- or graphsync-only) have no gateway-http provider and return 404; a provider that announces graphsync together with gateway-http is not matched.
 - PieceCID v1 (`baga6ea4...`) and other non-v2 CIDs are treated as payload CIDs and will usually 404.
+- Identity-multihash CIDs (content inline in the CID, such as `bafkqaaa`) cost an indexer lookup and get a cached 404.
 - Redirects cached by clients before this change may still point at the previous gateway for up to 24 hours.
 - Piece CIDs return 404 until a provider announces filecoin-piece-http.
 
