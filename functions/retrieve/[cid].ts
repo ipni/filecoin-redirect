@@ -14,5 +14,4 @@ function depsFor(
 export const onRequestGet: PagesFunction<Env> = (ctx) =>
   handle(ctx.request, String(ctx.params.cid), ctx.env, depsFor(ctx));
 
-export const onRequestHead: PagesFunction<Env> = (ctx) =>
-  handle(ctx.request, String(ctx.params.cid), ctx.env, depsFor(ctx));
+export const onRequestHead = onRequestGet;

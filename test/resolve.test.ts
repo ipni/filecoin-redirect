@@ -1,4 +1,6 @@
 import { describe, expect, it } from "vitest";
+import { CID } from "multiformats/cid";
+import { create as createDigest } from "multiformats/hashes/digest";
 import {
   gatewayLocation,
   hasPieceHttp,
@@ -57,6 +59,12 @@ describe("isPieceCid", () => {
     expect(isPieceCid(parseCid(IPFS_CID) as never)).toBe(false);
     expect(isPieceCid(parseCid(CIDV0) as never)).toBe(false);
     expect(isPieceCid(parseCid(PIECE_V1_CID) as never)).toBe(false);
+  });
+
+  it("rejects a CIDv1 with dag-pb codec and the piece multihash", () => {
+    const digest = createDigest(0x1011, new Uint8Array(32));
+    const cid = CID.createV1(0x70, digest);
+    expect(isPieceCid(cid)).toBe(false);
   });
 });
 
@@ -191,6 +199,12 @@ describe("multiaddrToBase", () => {
   it("rejects a path containing ? or ..", () => {
     expect(multiaddrToBase("/dns/sp.example.com/https/http-path/%2Fa%3Fb")).toBeNull();
     expect(multiaddrToBase("/dns/sp.example.com/https/http-path/%2F..%2Fetc")).toBeNull();
+  });
+
+  it("rejects empty and dot http-path segments", () => {
+    expect(multiaddrToBase("/dns/sp.example.com/https/http-path/%2F%2F")).toBeNull();
+    expect(multiaddrToBase("/dns/sp.example.com/https/http-path/a%2F%2Fb")).toBeNull();
+    expect(multiaddrToBase("/dns/sp.example.com/https/http-path/%2Fa%2F.%2Fb")).toBeNull();
   });
 });
 

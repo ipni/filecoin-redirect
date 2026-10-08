@@ -28,6 +28,11 @@ function trimTrailingSlash(value: string): string {
   return value.replace(/\/+$/, "");
 }
 
+function envSetting(value: string | undefined, fallback: string): string {
+  const trimmed = value?.trim() ?? "";
+  return trimmed === "" ? fallback : trimmed;
+}
+
 function resolveTtl(env: Env): number {
   const parsed = parseInt(env.CACHE_TTL_SECONDS ?? "", 10);
   return Number.isNaN(parsed) || parsed < 1 ? DEFAULT_TTL : parsed;
@@ -55,6 +60,10 @@ function redirectResponse(location: string, cacheControl: string): Response {
   });
 }
 
+function noProviderResponse(): Response {
+  return textResponse(404, "no HTTP piece provider indexed", "public, max-age=60");
+}
+
 function isPlainObject(value: unknown): value is FindResponse {
   return (
     typeof value === "object" &&
@@ -80,9 +89,11 @@ async function lookupIndexer(
   }
 
   if (res.status === 404) {
-    return textResponse(404, "no HTTP piece provider indexed", "public, max-age=60");
+    await res.body?.cancel();
+    return noProviderResponse();
   }
   if (!res.ok) {
+    await res.body?.cancel();
     return textResponse(502, "indexer unavailable", "no-store");
   }
 
@@ -112,7 +123,7 @@ export async function handle(
     return respond(textResponse(400, "not a CID", "no-store"));
   }
 
-  const gateway = trimTrailingSlash(env.GATEWAY_URL ?? DEFAULT_GATEWAY);
+  const gateway = trimTrailingSlash(envSetting(env.GATEWAY_URL, DEFAULT_GATEWAY));
   if (!isPieceCid(cid)) {
     return respond(
       redirectResponse(gatewayLocation(gateway, cid), "public, max-age=86400")
@@ -123,31 +134,36 @@ export async function handle(
     method: "GET"
   });
   if (deps.cache !== null) {
-    const hit = await deps.cache.match(key);
+    const hit = await deps.cache.match(key).catch(() => undefined);
     if (hit !== undefined) {
       return respond(hit);
     }
   }
 
-  const indexer = trimTrailingSlash(env.INDEXER_URL ?? DEFAULT_INDEXER);
+  const indexer = trimTrailingSlash(envSetting(env.INDEXER_URL, DEFAULT_INDEXER));
   const lookedUp = await lookupIndexer(deps, indexer, cid.toString());
   if (lookedUp instanceof Response) {
     const resp = lookedUp;
     if (deps.cache !== null && resp.status === 404) {
-      deps.waitUntil(deps.cache.put(key, resp.clone()));
+      deps.waitUntil(deps.cache.put(key, resp.clone()).catch(() => {}));
     }
     return respond(resp);
   }
 
   const ttl = resolveTtl(env);
-  const base = pickProviderBase(lookedUp);
+  let base: string | null;
+  try {
+    base = pickProviderBase(lookedUp);
+  } catch {
+    return respond(textResponse(502, "indexer unavailable", "no-store"));
+  }
   const resp =
     base === null
-      ? textResponse(404, "no HTTP piece provider indexed", "public, max-age=60")
+      ? noProviderResponse()
       : redirectResponse(pieceLocation(base, cid), `public, max-age=${ttl}`);
 
   if (deps.cache !== null) {
-    deps.waitUntil(deps.cache.put(key, resp.clone()));
+    deps.waitUntil(deps.cache.put(key, resp.clone()).catch(() => {}));
   }
   return respond(resp);
 }
